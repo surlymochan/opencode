@@ -17,6 +17,7 @@ import {
   type Value,
 } from "../interpreter/objects.js"
 import { describeValue } from "../interpreter/references.js"
+import { applyCollectionCallback, toPrimitiveNumber } from "../interpreter/callback.js"
 import type { Interpreter } from "../interpreter/interpreter.js"
 import { callbackMethods, sortArray } from "./array.js"
 
@@ -70,7 +71,35 @@ export const uint8ArrayGlobal = <R>(ctx: Interpreter<R>) => {
     }
   }
   methods(builtins, uint8Array, [
-    ["from", 1, (_, args) => Effect.map(collectBytes(ctx, args[0], "Uint8Array.from"), wrap)],
+    [
+      "from",
+      1,
+      (_, args) => {
+        if (args[1] === undefined) return Effect.map(collectBytes(ctx, args[0], "Uint8Array.from"), wrap)
+        const apply = applyCollectionCallback(ctx, args[1], "Uint8Array.from")
+        return Effect.gen(function* () {
+          const cursor = yield* ctx.iterate(args[0])
+          if (cursor === undefined)
+            throw typeError(
+              `Uint8Array.from expects a Uint8Array, an array, or an iterable of numbers, received ${describeValue(args[0])}.`,
+            )
+          // TypedArray.from consumes the iterable before mapping, and maps before byte conversion.
+          const values: Array<Value> = []
+          while (true) {
+            const step = yield* cursor.next
+            if (step.done) break
+            values.push(step.value)
+            checkArrayLength(values.length)
+          }
+          const bytes = new Uint8Array(values.length)
+          for (let index = 0; index < values.length; index += 1) {
+            const mapped = yield* apply([values[index]!, index], args[2])
+            bytes[index] = yield* toPrimitiveNumber(ctx, mapped)
+          }
+          return wrap(bytes)
+        })
+      },
+    ],
     ["of", 0, (_, args) => wrap(Uint8Array.from(args, coerceToNumber))],
     ["fromBase64", 1, (_, args) => decode("fromBase64", args, (text) => Uint8Array.fromBase64(text))],
     ["fromHex", 1, (_, args) => decode("fromHex", args, (text) => Uint8Array.fromHex(text))],
